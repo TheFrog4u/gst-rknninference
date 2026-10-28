@@ -1,0 +1,168 @@
+diff --git a/libreyolo/export/exporter.py b/libreyolo/export/exporter.py
+--- a/libreyolo/export/exporter.py
++++ b/libreyolo/export/exporter.py
+@@
+ _RECTANGULAR_EXPORT_FAMILIES = {
+     "hrnet",
+     "yolo9",
+     "yolo9_e2e",
+     "yolo9_p2",
++    "picodet",
+     "nafnet",
+@@
++class _PicoDetPaddleOutputWrapper(torch.nn.Module):
++    """Emit PaddleDetection's raw PicoDet score and DFL-regression tensors."""
++
++    def __init__(self, model: torch.nn.Module):
++        super().__init__()
++        self.model = model
++
++    def forward(self, x):
++        head = self.model.head
++        was_export = head.export
++        head.export = False
++        try:
++            cls_scores, bbox_preds = self.model(x)
++        finally:
++            head.export = was_export
++        scores = tuple(
++            torch.sigmoid(score).permute(0, 2, 3, 1).reshape(1, -1, score.shape[1])
++            for score in cls_scores
++        )
++        regressions = tuple(
++            prediction.permute(0, 2, 3, 1).reshape(1, -1, prediction.shape[1])
++            for prediction in bbox_preds
++        )
++        return (*scores, *regressions)
++
+@@
+         task = getattr(self.model, "task", "detect")
+         model_name = self.model._get_model_name()
++        if self.format_name == "onnx" and kwargs.get("paddle_output"):
++            if model_name != "picodet":
++                raise NotImplementedError(
++                    "paddle_output=True is supported for PicoDet ONNX export only."
++                )
++            if batch != 1:
++                raise ValueError("Paddle-compatible PicoDet export requires batch=1.")
++            if dynamic:
++                warnings.warn(
++                    "Paddle-compatible PicoDet export uses a fixed input shape; "
++                    "forcing dynamic=False.",
++                    RuntimeWarning,
++                    stacklevel=2,
++                )
++                dynamic = False
+@@
+ class OnnxExporter(BaseExporter):
+@@
++    _extra_export_kwargs = BaseExporter._extra_export_kwargs | frozenset(
++        {"paddle_output"}
++    )
+@@
+     def _preflight(self, *, half: bool, int8: bool, data: Optional[str], **kwargs):
++        if kwargs.get("paddle_output"):
++            if int8:
++                raise NotImplementedError(
++                    "Paddle-compatible PicoDet ONNX export does not support INT8."
++                )
++            if kwargs.get("nms") or kwargs.get("deepstream"):
++                raise ValueError(
++                    "paddle_output=True cannot be combined with nms=True or "
++                    "deepstream=True."
++                )
+@@
+         calibrate_method="MinMax",
+         nodes_to_exclude=None,
++        paddle_output=False,
+         **kwargs,
+     ):
+         imgsz = (dummy.shape[-2], dummy.shape[-1])
++        if paddle_output:
++            nn_model = _PicoDetPaddleOutputWrapper(nn_model).eval()
+@@
++            if paddle_output:
++                meta["paddle_output"] = "true"
+@@
+                     nms=nms,
+                     deepstream=deepstream,
++                    paddle_output=paddle_output,
+@@
+             nms=nms,
+             deepstream=deepstream,
++            paddle_output=paddle_output,
+diff --git a/libreyolo/export/onnx.py b/libreyolo/export/onnx.py
+--- a/libreyolo/export/onnx.py
++++ b/libreyolo/export/onnx.py
+@@
+     nms: bool = False,
+     deepstream: bool = False,
++    paddle_output: bool = False,
+@@
++    if paddle_output:
++        if metadata.get("model_family") != "picodet":
++            raise NotImplementedError(
++                "Paddle-compatible raw output is supported for PicoDet only."
++            )
++        levels = len(getattr(getattr(nn_model, "model", nn_model).head, "strides"))
++        output_names = [
++            *(f"cls_score_{level}" for level in range(levels)),
++            *(f"bbox_pred_{level}" for level in range(levels)),
++        ]
++        return _export_onnx_graph(
++            nn_model,
++            dummy,
++            output_path=output_path,
++            opset=opset,
++            simplify=simplify,
++            half=half,
++            metadata=metadata,
++            input_names=["images"],
++            output_names=output_names,
++            dynamic_axes=None,
++        )
++
+diff --git a/libreyolo/backends/base.py b/libreyolo/backends/base.py
+--- a/libreyolo/backends/base.py
++++ b/libreyolo/backends/base.py
+@@
+     def _parse_picodet(self, all_outputs, effective_imgsz, orig_w, orig_h, conf):
++        if isinstance(effective_imgsz, (tuple, list)):
++            input_h, input_w = (int(effective_imgsz[0]), int(effective_imgsz[1]))
++        else:
++            input_h = input_w = int(effective_imgsz)
+@@
+-        level_sizes = [((effective_imgsz + s - 1) // s) ** 2 for s in (8, 16, 32, 64)]
++        level_sizes = [
++            ((input_h + s - 1) // s) * ((input_w + s - 1) // s)
++            for s in (8, 16, 32, 64)
++        ]
+@@
+-        scale_x = orig_w / effective_imgsz
+-        scale_y = orig_h / effective_imgsz
++        scale_x = orig_w / input_w
++        scale_y = orig_h / input_h
+diff --git a/libreyolo/training/trainer.py b/libreyolo/training/trainer.py
+--- a/libreyolo/training/trainer.py
++++ b/libreyolo/training/trainer.py
+@@
+-# Values are the family's maximum feature stride; both imgsz dimensions must be
+-# divisible by it.
++# Values are the family's maximum feature stride. Unless listed in
++# ``CEIL_GRID_RECTANGULAR_TRAINING_FAMILIES``, both imgsz dimensions must be
++# divisible by it.
+ RECTANGULAR_TRAINING_FAMILIES = {
+@@
+     "unet": 16,
+ }
++# PicoDet's stride-2 feature pyramid uses ceil-rounded maps at every level,
++# including P6, so input dimensions do not need to divide its 64-pixel stride.
++CEIL_GRID_RECTANGULAR_TRAINING_FAMILIES = frozenset({"picodet"})
+@@
+             stride = RECTANGULAR_TRAINING_FAMILIES.get(family.lower(), 32)
+             h, w = int(imgsz[0]), int(imgsz[1])
+-            if h % stride != 0 or w % stride != 0:
++            if (
++                family.lower() not in CEIL_GRID_RECTANGULAR_TRAINING_FAMILIES
++                and (h % stride != 0 or w % stride != 0)
++            ):

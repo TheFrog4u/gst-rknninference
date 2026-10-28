@@ -102,7 +102,8 @@ score_value (gfloat x, gboolean logits)
 
 static gboolean
 extract_shape (const GstRknnTensorInfo *i, guint *c, guint *h, guint *w,
-    PicoDetLayout *layout)
+    PicoDetLayout *layout, guint model_width, guint model_height,
+    guint stride)
 {
   if (i->n_dims == 4) {
     *c = i->dims[1];
@@ -113,12 +114,19 @@ extract_shape (const GstRknnTensorInfo *i, guint *c, guint *h, guint *w,
   }
   if (i->n_dims == 3) {
     if (i->dims[0] == 1) {
-      guint side = (guint) (sqrt ((gdouble) i->dims[1]) + .5);
-      if (side * side != i->dims[1])
-        return FALSE;
       *c = i->dims[2];
-      *h = side;
-      *w = side;
+      if (model_width != 0 && model_height != 0) {
+        *w = (model_width + stride - 1) / stride;
+        *h = (model_height + stride - 1) / stride;
+        if (*h * *w != i->dims[1])
+          return FALSE;
+      } else {
+        guint side = (guint) (sqrt ((gdouble) i->dims[1]) + .5);
+        if (side * side != i->dims[1])
+          return FALSE;
+        *h = side;
+        *w = side;
+      }
       *layout = PICODET_LAYOUT_INTERLEAVED;
       return TRUE;
     }
@@ -341,7 +349,8 @@ gst_rknn_picodet_tensor_dec_transform_ip (GstBaseTransform *trans,
     outputs[i] = (const gfloat *) tmeta->data[i];
 
     if (!extract_shape (&tmeta->info[i], &channels[i], &heights[i],
-            &widths[i], &layouts[i])) {
+            &widths[i], &layouts[i], tmeta->input_width,
+            tmeta->input_height, picodet_strides[i % PICODET_SCALES])) {
       GST_WARNING_OBJECT (self, "Unexpected tensor dims: %u",
           tmeta->info[i].n_dims);
       return GST_FLOW_OK;
@@ -395,8 +404,10 @@ gst_rknn_picodet_tensor_dec_transform_ip (GstBaseTransform *trans,
     return GST_FLOW_OK;
   }
 
-  const guint model_width = widths[0] * picodet_strides[0];
-  const guint model_height = heights[0] * picodet_strides[0];
+  const guint model_width = tmeta->input_width
+      ? tmeta->input_width : widths[0] * picodet_strides[0];
+  const guint model_height = tmeta->input_height
+      ? tmeta->input_height : heights[0] * picodet_strides[0];
   const guint kept = nms (raw, total, self->iou_thresh,
       (guint) self->max_detection);
 

@@ -11,6 +11,8 @@ gst_rknn_tensor_meta_init (GstMeta *meta, gpointer params,
 {
   GstRknnTensorMeta *tmeta = (GstRknnTensorMeta *) meta;
   tmeta->n_tensors = 0;
+  tmeta->input_width = 0;
+  tmeta->input_height = 0;
   memset (tmeta->info, 0, sizeof (tmeta->info));
   memset (tmeta->data, 0, sizeof (tmeta->data));
   return TRUE;
@@ -71,7 +73,8 @@ gst_rknn_tensor_meta_get_info (void)
 
 GstRknnTensorMeta *
 gst_buffer_add_rknn_tensor_meta (GstBuffer *buffer,
-    guint n_tensors, const GstRknnTensorInfo *info, gpointer *data)
+    guint n_tensors, const GstRknnTensorInfo *info, gpointer *data,
+    guint input_width, guint input_height)
 {
   GstRknnTensorMeta *meta;
 
@@ -82,6 +85,8 @@ gst_buffer_add_rknn_tensor_meta (GstBuffer *buffer,
       GST_RKNN_TENSOR_META_INFO, NULL);
 
   meta->n_tensors = n_tensors;
+  meta->input_width = input_width;
+  meta->input_height = input_height;
   for (guint i = 0; i < n_tensors; i++) {
     meta->info[i] = info[i];
     /* Take ownership of the data pointer */

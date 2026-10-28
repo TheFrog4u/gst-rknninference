@@ -46,6 +46,8 @@ typedef struct {
 struct _GstRknnTensorMeta {
   GstMeta           meta;
   guint             n_tensors;
+  guint             input_width;
+  guint             input_height;
   GstRknnTensorInfo info[GST_RKNN_MAX_OUTPUTS];
   gpointer          data[GST_RKNN_MAX_OUTPUTS];  /* owned, g_free'd */
 };
@@ -57,7 +59,9 @@ GstRknnTensorMeta *
 gst_buffer_add_rknn_tensor_meta (GstBuffer *buffer,
                                  guint n_tensors,
                                  const GstRknnTensorInfo *info,
-                                 gpointer *data);
+                                 gpointer *data,
+                                 guint input_width,
+                                 guint input_height);
 
 GstRknnTensorMeta *
 gst_buffer_get_rknn_tensor_meta (GstBuffer *buffer);

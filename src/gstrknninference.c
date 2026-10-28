@@ -756,7 +756,7 @@ gst_rknn_inference_transform_ip (GstBaseTransform *trans,
 
   /* Attach tensor metadata to the buffer */
   gst_buffer_add_rknn_tensor_meta (buf, n_outputs, tensor_infos,
-      tensor_data);
+      tensor_data, self->model_width, self->model_height);
 
   g_free (tensor_infos);
   g_free (tensor_data);
